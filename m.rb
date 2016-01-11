@@ -9,18 +9,19 @@ require 'net/https'
 require 'uri'
 require 'optparse'
 require 'thread'
-require 'streamio-ffmpeg'
 require 'colorize'
 require 'rest-client'
 require 'json'
 
 def check_bit?(codec, bitrate)
-  if codec == 'mp3'
-    return true if bitrate.to_s >= '320'
-  elsif codec == 'aac'
-    return true if bitrate.to_s >= '256'
-  else
-    return true if codec=='flac' || codec=='ape' || codec=='wav' || codec=='tta' || codec=='tak' || codec=='alac'
+  bitrate = bitrate.to_i
+  codec = codec.to_s
+  if codec == 'mp3' and bitrate / 1000 > 300
+    return true
+  elsif codec == 'aac' and bitrate / 1000 > 210
+    return true
+  elsif ['flac', 'ape', 'wav', 'tta', 'tak', 'alac'].include?(codec)
+    return true
   end
 end
 
@@ -43,11 +44,12 @@ def upload_qiniu(info, token)
 end
 
 def get_id3(path)
-  command = <<-end_command
+    command = <<-end_command
       ffprobe -v quiet -print_format json -show_format "#{path}" > ./info.json
-  end_command
-  command.gsub!(/\s+/, " ")
-  system(command)
+    end_command
+    command.gsub!(/\s+/, " ")
+    system(command)
+    # TODO: Windows 适配
 end
 
 # 全局变量
@@ -88,13 +90,14 @@ n = 'flac' if n == ''
 # 遍历目录文件
 Dir.glob(path + '/*.' + n) do |file|
   begin
-    movie = FFMPEG::Movie.new(file)
     md5 = Digest::MD5.file(file).to_s
     get_id3(file)
-    tag = open(path + '/info.json') do |get|
+    info = open(path + '/info.json') do |get|
       JSON.load(get)
     end
-    tag = tag['format']['tags']
+    tag = info['format']['tags']
+    format_name = info['format']['format_name']
+    bit_rate = info['format']['bit_rate']
     if tag['title'].nil?
       title = tag['TITLE']
       artist = tag['ARTIST']
@@ -104,11 +107,11 @@ Dir.glob(path + '/*.' + n) do |file|
       artist = tag['artist']
       album = tag['album']
     end
-    puts "曲名:#{title}\n格式:#{movie.audio_codec}音质:#{movie.bitrate}\nMD5:#{md5}\nID3:\n#{title}\n#{artist}\n#{album}\n".yellow
+    puts "曲名:#{title}\n格式:#{format_name} 音质:#{bit_rate}\nMD5:#{md5}\nID3:\n#{title}\n#{artist}\n#{album}\n".yellow
 
-    $queue.push(title: title, artist: artist, album: album, file: file, md5: md5, bitrate: movie.bitrate, codec: movie.audio_codec)
+    $queue.push(title: title, artist: artist, album: album, file: file, md5: md5, bitrate: bit_rate, codec: format_name)
   rescue
-    puts "获取信息失败."
+    puts '获取信息失败.'
   end
 end
 
