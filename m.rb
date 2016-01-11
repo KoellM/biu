@@ -15,7 +15,6 @@ require 'json'
 
 def check_bit?(codec, bitrate)
   bitrate = bitrate.to_i
-  codec = codec.to_s
   if codec == 'mp3' and bitrate / 1000 > 300
     return true
   elsif codec == 'aac' and bitrate / 1000 > 210
