@@ -15,5 +15,4 @@
 * 运行 bundle install 等待安装完毕后即可使用，详细使用方法查看 m.rb -h 。
 
 ## TODOList
-* FFMPEG 改为 FFPROBE 获取音乐信息。
 * Windows 适配
