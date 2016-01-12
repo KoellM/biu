@@ -1,6 +1,6 @@
 #!/usr/bin/env ruby
 # TODO:
-# 上传队列
+# Windows 适配
 
 require 'rubygems'
 require 'digest/md5'
@@ -9,9 +9,11 @@ require 'net/https'
 require 'uri'
 require 'optparse'
 require 'thread'
+require 'bundler'
 require 'colorize'
 require 'rest-client'
 require 'json'
+require 'curb' unless RUBY_PLATFORM=~ /win32|mswin|mingw/
 
 def check_bit?(codec, bitrate)
   bitrate = bitrate.to_i
@@ -24,37 +26,47 @@ def check_bit?(codec, bitrate)
   end
 end
 
-def get_token(info)
-  url = URI.parse('https://api.biu.moe/Api/createSong')
-  res = Net::HTTP.new(url.host, url.port)
-  res.use_ssl = true
-  res.verify_mode = OpenSSL::SSL::VERIFY_NONE
-  req = Net::HTTP::Post.new(url.path)
-  if info[:force]
-    req.set_form_data({'uid' => $uid, 'filemd5' => info[:md5], 'title' => info[:title], 'singer' => info[:artist], 'album' => info[:album], 'remark' => $remark, 'sign' => info[:sign], 'force' => 1}, '&')
-  else
-    req.set_form_data({'uid' => $uid, 'filemd5' => info[:md5], 'title' => info[:title], 'singer' => info[:artist], 'album' => info[:album], 'remark' => $remark, 'sign' => info[:sign]}, '&')
+def get_token_or_upload_qiniu(info, token = nil)
+  begin
+    if info[:force]
+      RestClient.post('https://api.biu.moe/Api/createSong', 'uid' => $uid, 'filemd5' => info[:md5], 'title' => info[:title], 'singer' => info[:artist], 'album' => info[:album], 'remark' => $remark, 'sign' => info[:sign], 'force' => info[:fource])
+    elsif token
+      curl = Curl::Easy.new('http://upload.qiniu.com/')
+      curl.multipart_form_post = true
+      curl.on_progress do |_, _, upload_size, uploaded|
+        print "\r已上传: #{uploaded / 1000000}M / 共: #{upload_size / 1000000}M"
+        true
+      end
+      puts "正在上传: #{info[:title]}"
+      curl.http_post(Curl::PostField.file('file', info[:file]),
+                     Curl::PostField.content('key', info[:md5]),
+                     Curl::PostField.content('x:md5', info[:md5]),
+                     Curl::PostField.content('token', token))
+      puts
+    else
+      RestClient.post('https://api.biu.moe/Api/createSong', 'uid' => $uid, 'filemd5' => info[:md5], 'title' => info[:title], 'singer' => info[:artist], 'album' => info[:album], 'remark' => $remark, 'sign' => info[:sign])
+    end
+  rescue
+    if token
+      RestClient.post('http://upload.qiniu.com/', :file => File.new(info[:file], 'rb'), :key => info[:md5], "x:md5" => info[:md5], :token => token)
+    end
   end
-  res.request(req)
 end
 
-def upload_qiniu(info, token)
-  RestClient.post('http://upload.qiniu.com/', :file => File.new(info[:file], 'rb'), :key => info[:md5], "x:md5" => info[:md5], :token => token)
-end
 
 def get_id3(path)
-    command = <<-end_command
+  command = <<-end_command
       ffprobe -v quiet -print_format json -show_format "#{path}" > ./info.json
-    end_command
-    command.gsub!(/\s+/, " ")
-    system(command)
-    # TODO: Windows 适配
+  end_command
+  command.gsub!(/\s+/, " ")
+  system(command)
+  # TODO: Windows 适配
 end
 
 # 全局变量
 $uid = '152'
 $remark = ''
-$key = 'ZYeNPAoLOJlSoKIQrwIlmcedYbdxakrQ'
+$key = ''
 
 # 新建队列
 $queue = Queue.new
@@ -138,63 +150,65 @@ threadNums.times do
     until $upload_queue.empty?
       info = $upload_queue.pop(true) rescue nil
       begin
-        resp = get_token(info)
+        resp = get_token_or_upload_qiniu(info)
       rescue SocketError
         puts "获取失败,请检查网络."
       end
-
-      case resp
-        when Net::HTTPSuccess
-          json = JSON.parse(resp.body)
-          if json['success'] == true
-            puts "获取令牌成功,开始上传:#{info[:title]}".green
-            token = json['token']
-            begin
-              upload_qiniu(info, token)
-              puts '上传成功'.green
-            rescue
-              puts '上传失败'.yellow
+      if resp.code == 200
+        json = JSON.parse(resp.body)
+        if json['success'] == true
+          puts "\n获取令牌成功,开始上传:#{info[:title]}".green
+          token = json['token']
+          begin
+            res = get_token_or_upload_qiniu(info, token)
+            if res.code == 200
+              puts "\n上传成功".green
+            else
+              puts '上传失败'
             end
-          else
-            puts "\n歌曲: #{info[:title]} 获取令牌失败,错误代码: #{json['error_code']}.".yellow
-            case json['error_code'].to_i
-              when 1
-                puts "Sign 签名校检失败."
-              when 2
-                puts "系统检测疑似撞车."
-                result = json['result']
-                puts "\n系统检测疑似到稿件撞车,请详细核对确认是否撞车.\n".red
-                puts "本地歌曲信息: 曲名: #{info[:title]} | 歌手: #{info[:artist]} | 专辑: #{info[:album]}"
-                result.each do |r|
-                  case r['level'].to_i
-                    when 1
-                      r['level'] = '无损'
-                    when 2
-                      r['level'] = '高音质 AAC'
-                    when 3
-                      r['level'] = '高音质 MP3'
-                    when 4
-                      r['level'] = '渣音质 MP3'
-                  end
-                  puts "撞车可能性评分#{r['score']} | 歌曲ID: #{r['sid']} | 曲名: #{r['title']} | 歌手: #{r['singer']} | 专辑: #{r['album']} | 音质: #{r['level']} \n "
-                end
-                print '确认没有撞车强行上传请按1,我要放弃上传请按2: '
-                STDOUT.flush
-                up = gets.to_s.chomp
-                if up.to_i == 1
-                  $upload_queue.push(title: info[:title], artist: info[:artist], album: info[:album], file: info[:file], md5: info[:md5], sign: info[:sign], force: 1)
-                  puts "已加入上传队列".green
-                end
-              when 3
-                puts "未通过审核的歌曲超过 100 首，请先进入网站『我上传的音乐』删除一部分未通过的文件."
-              when 4
-                puts "参数不齐，至少歌曲名不能为空."
-              when 5
-                puts "服务器已存在该文件（撞 MD5）."
-            end
+          rescue
+            puts '上传失败'.yellow
           end
         else
-          puts "获取失败,请检查网络状态."
+          puts "\n歌曲: #{info[:title]} 获取令牌失败,错误代码: #{json['error_code']}.".yellow
+          case json['error_code'].to_i
+            when 1
+              puts "Sign 签名校检失败."
+            when 2
+              puts "系统检测疑似撞车."
+              result = json['result']
+              puts "\n系统检测疑似到稿件撞车,请详细核对确认是否撞车.\n".red
+              puts "本地歌曲信息: 曲名: #{info[:title]} | 歌手: #{info[:artist]} | 专辑: #{info[:album]}"
+              result.each do |r|
+                case r['level'].to_i
+                  when 1
+                    r['level'] = '无损'
+                  when 2
+                    r['level'] = '高音质 AAC'
+                  when 3
+                    r['level'] = '高音质 MP3'
+                  when 4
+                    r['level'] = '渣音质 MP3'
+                end
+                puts "撞车可能性评分#{r['score']} | 歌曲ID: #{r['sid']} | 曲名: #{r['title']} | 歌手: #{r['singer']} | 专辑: #{r['album']} | 音质: #{r['level']} \n "
+              end
+              print '确认没有撞车强行上传请按1,我要放弃上传请按2: '
+              STDOUT.flush
+              up = gets.to_s.chomp
+              if up.to_i == 1
+                $upload_queue.push(title: info[:title], artist: info[:artist], album: info[:album], file: info[:file], md5: info[:md5], sign: info[:sign], force: 1)
+                puts "已加入上传队列".green
+              end
+            when 3
+              puts "未通过审核的歌曲超过 100 首，请先进入网站『我上传的音乐』删除一部分未通过的文件."
+            when 4
+              puts "参数不齐，至少歌曲名不能为空."
+            when 5
+              puts "服务器已存在该文件（撞 MD5）."
+          end
+        end
+      else
+        puts "获取失败,请检查网络状态."
       end
     end
   end
