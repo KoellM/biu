@@ -10,10 +10,10 @@ require 'uri'
 require 'optparse'
 require 'thread'
 require 'bundler'
-require 'colorize'
+require 'colorize' unless RUBY_PLATFORM=~ /java/
 require 'rest-client'
 require 'json'
-require 'curb' unless RUBY_PLATFORM=~ /win32|mswin|mingw/
+require 'curb' unless RUBY_PLATFORM=~ /win32|mswin|mingw|java/
 
 def check_bit?(codec, bitrate)
   bitrate = bitrate.to_i
@@ -34,15 +34,17 @@ def get_token_or_upload_qiniu(info, token = nil)
       curl = Curl::Easy.new('http://upload.qiniu.com/')
       curl.multipart_form_post = true
       curl.on_progress do |_, _, upload_size, uploaded|
-        print "\r已上传: #{uploaded / 1000000}M / 共: #{upload_size / 1000000}M"
+        uploaded = uploaded / 1000000
+        upload_size = upload_size / 1000000
+        print "\r已上传: #{uploaded.to_s.slice(0..3)}M / 共: #{upload_size.to_s.slice(0..3)}M"
         true
       end
+      curl.on_success { |easy| puts "\nsuccess" }
       puts "正在上传: #{info[:title]}"
       curl.http_post(Curl::PostField.file('file', info[:file]),
                      Curl::PostField.content('key', info[:md5]),
                      Curl::PostField.content('x:md5', info[:md5]),
                      Curl::PostField.content('token', token))
-      puts
     else
       RestClient.post('https://api.biu.moe/Api/createSong', 'uid' => $uid, 'filemd5' => info[:md5], 'title' => info[:title], 'singer' => info[:artist], 'album' => info[:album], 'remark' => $remark, 'sign' => info[:sign])
     end
@@ -161,13 +163,13 @@ threadNums.times do
           token = json['token']
           begin
             res = get_token_or_upload_qiniu(info, token)
-            if res.code == 200
+            if res == true || res.code == 200
               puts "\n上传成功".green
             else
               puts '上传失败'
             end
           rescue
-            puts '上传失败'.yellow
+            puts '上传失败'
           end
         else
           puts "\n歌曲: #{info[:title]} 获取令牌失败,错误代码: #{json['error_code']}.".yellow
