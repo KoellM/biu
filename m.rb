@@ -31,27 +31,29 @@ def get_token_or_upload_qiniu(info, token = nil)
     if info[:force]
       RestClient.post('https://api.biu.moe/Api/createSong', 'uid' => $uid, 'filemd5' => info[:md5], 'title' => info[:title], 'singer' => info[:artist], 'album' => info[:album], 'remark' => $remark, 'sign' => info[:sign], 'force' => info[:fource])
     elsif token
-      curl = Curl::Easy.new('http://upload.qiniu.com/')
-      curl.multipart_form_post = true
-      curl.on_progress do |_, _, upload_size, uploaded|
-        uploaded = uploaded / 1000000
-        upload_size = upload_size / 1000000
-        print "\r已上传: #{uploaded.to_s.slice(0..3)}M / 共: #{upload_size.to_s.slice(0..3)}M"
-        true
-      end
-      curl.on_success { |easy| puts "\nsuccess" }
-      puts "正在上传: #{info[:title]}"
-      curl.http_post(Curl::PostField.file('file', info[:file]),
-                     Curl::PostField.content('key', info[:md5]),
-                     Curl::PostField.content('x:md5', info[:md5]),
-                     Curl::PostField.content('token', token))
+      begin
+        curl = Curl::Easy.new('http://upload.qiniu.com/')
+        curl.multipart_form_post = true
+        curl.on_progress do |_, _, upload_size, uploaded|
+            uploaded = uploaded / 1000000
+            upload_size = upload_size / 1000000
+            print "\r已上传: #{uploaded.to_s.slice(0..3)}M / 共: #{upload_size.to_s.slice(0..3)}M"
+            true
+        end
+        curl.on_success { |easy| puts "\nsuccess" }
+        puts "正在上传: #{info[:title]}"
+        curl.http_post(Curl::PostField.file('file', info[:file]),
+                        Curl::PostField.content('key', info[:md5]),
+                        Curl::PostField.content('x:md5', info[:md5]),
+                        Curl::PostField.content('token', token))
+      rescue
+        RestClient.post('http://upload.qiniu.com/', :file => File.new(info[:file], 'rb'), :key => info[:md5], "x:md5" => info[:md5], :token => token)
+      end          
     else
       RestClient.post('https://api.biu.moe/Api/createSong', 'uid' => $uid, 'filemd5' => info[:md5], 'title' => info[:title], 'singer' => info[:artist], 'album' => info[:album], 'remark' => $remark, 'sign' => info[:sign])
     end
   rescue
-    if token
-      RestClient.post('http://upload.qiniu.com/', :file => File.new(info[:file], 'rb'), :key => info[:md5], "x:md5" => info[:md5], :token => token)
-    end
+    puts "Error"
   end
 end
 
@@ -61,8 +63,16 @@ def get_id3(path)
       ffprobe -v quiet -print_format json -show_format "#{path}" > ./info.json
   end_command
   command.gsub!(/\s+/, " ")
-  system(command)
-  # TODO: Windows 适配
+  cmd = system(command)
+  if cmd == false
+    puts "系统可能没有安装 FFMPEG, 正在尝试使用 info.exe 获取."
+    command = <<-end_command
+        info.exe -v quiet -print_format json -show_format "#{path}" > ./info.json
+    end_command
+    command.gsub!(/\s+/, " ")
+    cmd = system(command)
+  end
+  return cmd
 end
 
 # 全局变量
@@ -105,7 +115,7 @@ Dir.glob(path + '/*.' + n) do |file|
   begin
     md5 = Digest::MD5.file(file).to_s
     get_id3(file)
-    info = open(path + '/info.json') do |get|
+    info = open('./info.json') do |get|
       JSON.load(get)
     end
     tag = info['format']['tags']
